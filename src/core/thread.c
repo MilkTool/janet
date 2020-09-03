@@ -66,9 +66,15 @@ struct JanetMailbox {
     JanetBuffer messages[];
 };
 
+#define JANET_THREAD_HEAVYWEIGHT 0x1
+#define JANET_THREAD_ABSTRACTS 0x2
+#define JANET_THREAD_CFUNCTIONS 0x4
+static const char janet_thread_flags[] = "hac";
+
 typedef struct {
     JanetMailbox *original;
     JanetMailbox *newbox;
+    uint64_t flags;
 } JanetMailboxPair;
 
 static JANET_THREAD_LOCAL JanetMailbox *janet_vm_mailbox = NULL;
@@ -175,7 +181,7 @@ static int thread_mark(void *p, size_t size) {
     return 0;
 }
 
-static JanetMailboxPair *make_mailbox_pair(JanetMailbox *original) {
+static JanetMailboxPair *make_mailbox_pair(JanetMailbox *original, uint64_t flags) {
     JanetMailboxPair *pair = malloc(sizeof(JanetMailboxPair));
     if (NULL == pair) {
         JANET_OUT_OF_MEMORY;
@@ -183,6 +189,7 @@ static JanetMailboxPair *make_mailbox_pair(JanetMailbox *original) {
     pair->original = original;
     janet_mailbox_ref(original, 1);
     pair->newbox = janet_mailbox_create(1, 16);
+    pair->flags = flags;
     return pair;
 }
 
@@ -227,7 +234,7 @@ static void janet_waiter_init(JanetWaiter *waiter, double sec) {
     if (waiter->timedwait) {
         /* N seconds -> timespec of (now + sec) */
         struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
+        janet_gettime(&now);
         time_t tvsec = (time_t) floor(sec);
         long tvnsec = (long) floor(1000000000.0 * (sec - ((double) tvsec)));
         tvsec += now.tv_sec;
@@ -368,8 +375,12 @@ int janet_thread_receive(Janet *msg_out, double timeout) {
 
             /* Handle errors */
             if (setjmp(buf)) {
-                /* Cleanup jmp_buf, keep lock */
+                /* Cleanup jmp_buf, return error.
+                 * Do not ignore bad messages as before. */
                 janet_vm_jmp_buf = old_buf;
+                *msg_out = *janet_vm_return_reg;
+                janet_mailbox_unlock(mailbox);
+                return 2;
             } else {
                 JanetBuffer *msgbuf = mailbox->messages + mailbox->messageFirst;
                 mailbox->messageCount--;
@@ -404,7 +415,6 @@ int janet_thread_receive(Janet *msg_out, double timeout) {
             return 1;
         }
     }
-
 }
 
 static int janet_thread_getter(void *p, Janet key, Janet *out);
@@ -442,16 +452,44 @@ static int thread_worker(JanetMailboxPair *pair) {
     janet_init();
 
     /* Get dictionaries for default encode/decode */
-    JanetTable *encode = janet_get_core_table("make-image-dict");
+    JanetTable *encode;
+    if (pair->flags & JANET_THREAD_HEAVYWEIGHT) {
+        encode = janet_get_core_table("make-image-dict");
+    } else {
+        encode = NULL;
+        janet_vm_thread_decode = janet_table(0);
+        janet_gcroot(janet_wrap_table(janet_vm_thread_decode));
+    }
 
     /* Create parent thread */
     JanetThread *parent = janet_make_thread(pair->original, encode);
     Janet parentv = janet_wrap_abstract(parent);
 
+    /* Unmarshal the abstract registry */
+    if (pair->flags & JANET_THREAD_ABSTRACTS) {
+        Janet reg;
+        int status = janet_thread_receive(&reg, INFINITY);
+        if (status) goto error;
+        if (!janet_checktype(reg, JANET_TABLE)) goto error;
+        janet_gcunroot(janet_wrap_table(janet_vm_abstract_registry));
+        janet_vm_abstract_registry = janet_unwrap_table(reg);
+        janet_gcroot(janet_wrap_table(janet_vm_abstract_registry));
+    }
+
+    /* Unmarshal the normal registry */
+    if (pair->flags & JANET_THREAD_CFUNCTIONS) {
+        Janet reg;
+        int status = janet_thread_receive(&reg, INFINITY);
+        if (status) goto error;
+        if (!janet_checktype(reg, JANET_TABLE)) goto error;
+        janet_gcunroot(janet_wrap_table(janet_vm_registry));
+        janet_vm_registry = janet_unwrap_table(reg);
+        janet_gcroot(janet_wrap_table(janet_vm_registry));
+    }
+
     /* Unmarshal the function */
     Janet funcv;
     int status = janet_thread_receive(&funcv, INFINITY);
-
     if (status) goto error;
     if (!janet_checktype(funcv, JANET_FUNCTION)) goto error;
     JanetFunction *func = janet_unwrap_function(funcv);
@@ -464,6 +502,10 @@ static int thread_worker(JanetMailboxPair *pair) {
     /* Call function */
     Janet argv[1] = { parentv };
     fiber = janet_fiber(func, 64, 1, argv);
+    if (pair->flags & JANET_THREAD_HEAVYWEIGHT) {
+        fiber->env = janet_table(0);
+        fiber->env->proto = janet_core_env(NULL);
+    }
     JanetSignal sig = janet_continue(fiber, janet_wrap_nil(), &out);
     if (sig != JANET_SIGNAL_OK && sig < JANET_SIGNAL_USER0) {
         janet_eprintf("in thread %v: ", janet_wrap_abstract(janet_make_thread(pair->newbox, encode)));
@@ -558,20 +600,38 @@ static Janet cfun_thread_current(int32_t argc, Janet *argv) {
 }
 
 static Janet cfun_thread_new(int32_t argc, Janet *argv) {
-    janet_arity(argc, 1, 2);
+    janet_arity(argc, 1, 3);
     /* Just type checking */
     janet_getfunction(argv, 0);
     int32_t cap = janet_optinteger(argv, argc, 1, 10);
     if (cap < 1 || cap > UINT16_MAX) {
         janet_panicf("bad slot #1, expected integer in range [1, 65535], got %d", cap);
     }
-    JanetTable *encode = janet_get_core_table("make-image-dict");
+    uint64_t flags = argc >= 3 ? janet_getflags(argv, 2, janet_thread_flags) : JANET_THREAD_ABSTRACTS;
+    JanetTable *encode;
+    if (flags & JANET_THREAD_HEAVYWEIGHT) {
+        encode = janet_get_core_table("make-image-dict");
+    } else {
+        encode = NULL;
+    }
 
-    JanetMailboxPair *pair = make_mailbox_pair(janet_vm_mailbox);
+    JanetMailboxPair *pair = make_mailbox_pair(janet_vm_mailbox, flags);
     JanetThread *thread = janet_make_thread(pair->newbox, encode);
     if (janet_thread_start_child(pair)) {
         destroy_mailbox_pair(pair);
         janet_panic("could not start thread");
+    }
+
+    if (flags & JANET_THREAD_ABSTRACTS) {
+        if (janet_thread_send(thread, janet_wrap_table(janet_vm_abstract_registry), INFINITY)) {
+            janet_panic("could not send abstract registry to thread");
+        }
+    }
+
+    if (flags & JANET_THREAD_CFUNCTIONS) {
+        if (janet_thread_send(thread, janet_wrap_table(janet_vm_registry), INFINITY)) {
+            janet_panic("could not send registry to thread");
+        }
     }
 
     /* If thread started, send the worker function. */
@@ -607,6 +667,8 @@ static Janet cfun_thread_receive(int32_t argc, Janet *argv) {
             break;
         case 1:
             janet_panicf("timeout after %f seconds", wait);
+        case 2:
+            janet_panicf("failed to receive message: %v", out);
     }
     return out;
 }
@@ -615,6 +677,18 @@ static Janet cfun_thread_close(int32_t argc, Janet *argv) {
     janet_fixarity(argc, 1);
     JanetThread *thread = janet_getthread(argv, 0);
     janet_close_thread(thread);
+    return janet_wrap_nil();
+}
+
+static Janet cfun_thread_exit(int32_t argc, Janet *argv) {
+    (void) argv;
+    janet_arity(argc, 0, 1);
+#if defined(JANET_WINDOWS)
+    int32_t flag = janet_optinteger(argv, argc, 0, 0);
+    ExitThread(flag);
+#else
+    pthread_exit(NULL);
+#endif
     return janet_wrap_nil();
 }
 
@@ -638,10 +712,14 @@ static const JanetReg threadlib_cfuns[] = {
     },
     {
         "thread/new", cfun_thread_new,
-        JDOC("(thread/new func &opt capacity)\n\n"
+        JDOC("(thread/new func &opt capacity flags)\n\n"
              "Start a new thread that will start immediately. "
              "If capacity is provided, that is how many messages can be stored in the thread's mailbox before blocking senders. "
              "The capacity must be between 1 and 65535 inclusive, and defaults to 10. "
+             "Can optionally provide flags to the new thread - supported flags are:\n"
+             "\t:h - Start a heavyweight thread. This loads the core environment by default, so may use more memory initially. Messages may compress better, though.\n"
+             "\t:a - Allow sending over registered abstract types to the new thread\n"
+             "\t:c - Send over cfunction information to the new thread.\n"
              "Returns a handle to the new thread.")
     },
     {
@@ -661,6 +739,12 @@ static const JanetReg threadlib_cfuns[] = {
         JDOC("(thread/close thread)\n\n"
              "Close a thread, unblocking it and ending communication with it. Note that closing "
              "a thread is idempotent and does not cancel the thread's operation. Returns nil.")
+    },
+    {
+        "thread/exit", cfun_thread_exit,
+        JDOC("(thread/exit &opt code)\n\n"
+             "Exit from the current thread. If no more threads are running, ends the process, but otherwise does "
+             "not end the current process.")
     },
     {NULL, NULL, NULL}
 };

@@ -36,7 +36,7 @@
       :loop (/ (* "[" :main "]") ,(fn [& captures]
                                     ~(while (not= (get DATA POS) 0)
                                        ,;captures)))
-      :main (any (+ :s :loop :+ :- :> :< :.)) }))
+      :main (any (+ :s :loop :+ :- :> :< :.))}))
 
 (defn bf
   "Run brainfuck."
@@ -233,8 +233,8 @@ neldb\0\0\0\xD8\x05printG\x01\0\xDE\xDE\xDE'\x03\0marshal_tes/\x02
 (gccollect)
 
 (def v (unmarshal
-  @"\xD7\xCD0\xD4000000\0\x03\x01\xCE\00\0\x01\0\0000\x03\0\0\0000000000\xCC0\0000"
-  load-image-dict))
+         @"\xD7\xCD0\xD4000000\0\x03\x01\xCE\00\0\x01\0\0000\x03\0\0\0000000000\xCC0\0000"
+         load-image-dict))
 (gccollect)
 
 # in vs get regression
@@ -271,7 +271,7 @@ neldb\0\0\0\xD8\x05printG\x01\0\xDE\xDE\xDE'\x03\0marshal_tes/\x02
       :packet-body '(lenprefix (-> :header-len) 1)
 
       # header, followed by body, and drop the :header-len capture
-      :packet (/ (* :packet-header :packet-body) ,|$1) 
+      :packet (/ (* :packet-header :packet-body) ,|$1)
 
       # any exact seqence of packets (no extra characters)
       :main (* (any :packet) -1)}))
@@ -287,5 +287,66 @@ neldb\0\0\0\xD8\x05printG\x01\0\xDE\xDE\xDE'\x03\0marshal_tes/\x02
 
 # Issue #412
 (assert (peg/match '(* "a" (> -1 "a") "b") "abc") "lookhead does not move cursor")
+
+(def peg3
+  ~{:main (* "(" (thru ")"))})
+
+(def peg4 (peg/compile ~(* (thru "(") '(to ")"))))
+
+(assert (peg/match peg3 "(12345)") "peg thru 1")
+(assert (not (peg/match peg3 " (12345)")) "peg thru 2")
+(assert (not (peg/match peg3 "(12345")) "peg thru 3")
+
+(assert (= "abc" (0 (peg/match peg4 "123(abc)"))) "peg thru/to 1")
+(assert (= "abc" (0 (peg/match peg4 "(abc)"))) "peg thru/to 2")
+(assert (not (peg/match peg4 "123(abc")) "peg thru/to 3")
+
+(def peg5 (peg/compile [3 "abc"]))
+
+(assert (:match peg5 "abcabcabc") "repeat alias 1")
+(assert (:match peg5 "abcabcabcac") "repeat alias 2")
+(assert (not (:match peg5 "abcabc")) "repeat alias 3")
+
+(defn check-jdn [x]
+  (assert (deep= (parse (string/format "%j" x)) x) "round trip jdn"))
+
+(check-jdn 0)
+(check-jdn nil)
+(check-jdn [])
+(check-jdn @[[] [] 1231 9.123123 -123123 0.1231231230001])
+(check-jdn -0.123123123123)
+(check-jdn 12837192371923)
+(check-jdn "a string")
+(check-jdn @"a buffer")
+
+# Issue 428
+(var result nil)
+(defn f [] (yield {:a :ok}))
+(assert-no-error "issue 428 1" (loop [{:a x} :generate (fiber/new f)] (set result x)))
+(assert (= result :ok) "issue 428 2")
+
+# Inline 3 argument get
+(assert (= 10 (do (var a 10) (set a (get '{} :a a)))) "inline get 1")
+
+# Keyword and Symbol slice
+(assert (= :keyword (keyword/slice "some_keyword_slice" 5 12)) "keyword slice")
+(assert (= 'symbol (symbol/slice "some_symbol_slice" 5 11)) "symbol slice")
+
+# Peg find and find-all
+(def p "/usr/local/bin/janet")
+(assert (= (peg/find '"n/" p) 13) "peg find 1")
+(assert (not (peg/find '"t/" p)) "peg find 2")
+(assert (deep= (peg/find-all '"/" p) @[0 4 10 14]) "peg find-all")
+
+# Peg replace and replace-all
+(var ti 0)
+(defn check-replacer
+  [x y z]
+  (assert (= (string/replace x y z) (string (peg/replace x y z))) "replacer test replace")
+  (assert (= (string/replace-all x y z) (string (peg/replace-all x y z))) "replacer test replace-all"))
+(check-replacer "abc" "Z" "abcabcabcabasciabsabc")
+(check-replacer "abc" "Z" "")
+(check-replacer "aba" "ZZZZZZ" "ababababababa")
+(check-replacer "aba" "" "ababababababa")
 
 (end-suite)

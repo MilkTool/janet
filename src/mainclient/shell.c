@@ -84,7 +84,7 @@ static void simpleline(JanetBuffer *buffer) {
 }
 
 /* Windows */
-#ifdef JANET_WINDOWS
+#if defined(JANET_WINDOWS) || defined(JANET_SIMPLE_GETLINE)
 
 void janet_line_init() {
     ;
@@ -126,21 +126,28 @@ https://github.com/antirez/linenoise/blob/master/linenoise.c
 #define JANET_LINE_MAX 1024
 #define JANET_MATCH_MAX 256
 #define JANET_HISTORY_MAX 100
-static JANET_THREAD_LOCAL int gbl_israwmode = 0;
-static JANET_THREAD_LOCAL const char *gbl_prompt = "> ";
-static JANET_THREAD_LOCAL int gbl_plen = 2;
-static JANET_THREAD_LOCAL char gbl_buf[JANET_LINE_MAX];
-static JANET_THREAD_LOCAL int gbl_len = 0;
-static JANET_THREAD_LOCAL int gbl_pos = 0;
-static JANET_THREAD_LOCAL int gbl_cols = 80;
-static JANET_THREAD_LOCAL char *gbl_history[JANET_HISTORY_MAX];
-static JANET_THREAD_LOCAL int gbl_history_count = 0;
-static JANET_THREAD_LOCAL int gbl_historyi = 0;
-static JANET_THREAD_LOCAL int gbl_sigint_flag = 0;
-static JANET_THREAD_LOCAL struct termios gbl_termios_start;
-static JANET_THREAD_LOCAL JanetByteView gbl_matches[JANET_MATCH_MAX];
-static JANET_THREAD_LOCAL int gbl_match_count = 0;
-static JANET_THREAD_LOCAL int gbl_lines_below = 0;
+static int gbl_israwmode = 0;
+static const char *gbl_prompt = "> ";
+static int gbl_plen = 2;
+static char gbl_buf[JANET_LINE_MAX];
+static int gbl_len = 0;
+static int gbl_pos = 0;
+static int gbl_cols = 80;
+static char *gbl_history[JANET_HISTORY_MAX];
+static int gbl_history_count = 0;
+static int gbl_historyi = 0;
+static int gbl_sigint_flag = 0;
+static struct termios gbl_termios_start;
+static JanetByteView gbl_matches[JANET_MATCH_MAX];
+static int gbl_match_count = 0;
+static int gbl_lines_below = 0;
+
+/* Put a lock around this global state so we don't screw up
+ * the terminal in a multithreaded situation */
+#ifndef JANET_SINGLE_THREADED
+#include <pthread.h>
+static pthread_mutex_t gbl_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 /* Unsupported terminal list from linenoise */
 static const char *badterms[] = {
@@ -162,6 +169,9 @@ static char *sdup(const char *s) {
 /* Ansi terminal raw mode */
 static int rawmode(void) {
     struct termios t;
+#ifndef JANET_SINGLE_THREADED
+    pthread_mutex_lock(&gbl_lock);
+#endif
     if (!isatty(STDIN_FILENO)) goto fatal;
     if (tcgetattr(STDIN_FILENO, &gbl_termios_start) == -1) goto fatal;
     t = gbl_termios_start;
@@ -170,18 +180,24 @@ static int rawmode(void) {
     t.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     t.c_cc[VMIN] = 1;
     t.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &t) < 0) goto fatal;
+    if (tcsetattr(STDIN_FILENO, TCSADRAIN, &t) < 0) goto fatal;
     gbl_israwmode = 1;
     return 0;
 fatal:
     errno = ENOTTY;
+#ifndef JANET_SINGLE_THREADED
+    pthread_mutex_unlock(&gbl_lock);
+#endif
     return -1;
 }
 
 /* Disable raw mode */
 static void norawmode(void) {
-    if (gbl_israwmode && tcsetattr(STDIN_FILENO, TCSAFLUSH, &gbl_termios_start) != -1)
+    if (gbl_israwmode && tcsetattr(STDIN_FILENO, TCSADRAIN, &gbl_termios_start) != -1)
         gbl_israwmode = 0;
+#ifndef JANET_SINGLE_THREADED
+    pthread_mutex_unlock(&gbl_lock);
+#endif
 }
 
 static int curpos(void) {
@@ -995,6 +1011,28 @@ int main(int argc, char **argv) {
     SetConsoleMode(hOut, dwMode);
     SetConsoleOutputCP(65001);
 #endif
+
+#if !defined(JANET_WINDOWS) && !defined(JANET_SIMPLE_GETLINE)
+    /* Try and not leave the terminal in a bad state */
+    atexit(norawmode);
+#endif
+
+#if defined(JANET_PRF)
+    uint8_t hash_key[JANET_HASH_KEY_SIZE + 1];
+#ifdef JANET_REDUCED_OS
+    char *envvar = NULL;
+#else
+    char *envvar = getenv("JANET_HASHSEED");
+#endif
+    if (NULL != envvar) {
+        strncpy((char *) hash_key, envvar, sizeof(hash_key) - 1);
+    } else if (janet_cryptorand(hash_key, JANET_HASH_KEY_SIZE) != 0) {
+        fputs("unable to initialize janet PRF hash function.\n", stderr);
+        return 1;
+    }
+    janet_init_hash_key(hash_key);
+#endif
+
 
     /* Set up VM */
     janet_init();

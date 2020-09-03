@@ -127,6 +127,12 @@ extern "C" {
 #define JANET_LITTLE_ENDIAN 1
 #endif
 
+/* Limits for converting doubles to 64 bit integers */
+#define JANET_INTMAX_DOUBLE 9007199254740992.0
+#define JANET_INTMIN_DOUBLE (-9007199254740992.0)
+#define JANET_INTMAX_INT64 9007199254740992
+#define JANET_INTMIN_INT64 (-9007199254740992)
+
 /* Check emscripten */
 #ifdef __EMSCRIPTEN__
 #define JANET_NO_DYNAMIC_MODULES
@@ -219,6 +225,11 @@ extern "C" {
  * To turn of nanboxing, for debugging purposes or for certain
  * architectures (Nanboxing only tested on x86 and x64), comment out
  * the JANET_NANBOX define.*/
+
+#if defined(_M_ARM64) || defined(_M_ARM) || defined(__aarch64__)
+#define JANET_NO_NANBOX
+#endif
+
 #ifndef JANET_NO_NANBOX
 #ifdef JANET_32
 #define JANET_NANBOX_32
@@ -706,7 +717,7 @@ JANET_API int janet_checkint64(Janet x);
 JANET_API int janet_checksize(Janet x);
 JANET_API JanetAbstract janet_checkabstract(Janet x, const JanetAbstractType *at);
 #define janet_checkintrange(x) ((x) >= INT32_MIN && (x) <= INT32_MAX && (x) == (int32_t)(x))
-#define janet_checkint64range(x) ((x) >= INT64_MIN && (x) <= INT64_MAX && (x) == (int64_t)(x))
+#define janet_checkint64range(x) ((x) >= JANET_INTMIN_DOUBLE && (x) <= JANET_INTMAX_DOUBLE && (x) == (int64_t)(x))
 #define janet_unwrap_integer(x) ((int32_t) janet_unwrap_number(x))
 #define janet_wrap_integer(x) janet_wrap_number((int32_t)(x))
 
@@ -996,7 +1007,7 @@ struct JanetRNG {
 typedef struct JanetFile JanetFile;
 struct JanetFile {
     FILE *file;
-    int flags;
+    int32_t flags;
 };
 
 /* Thread types */
@@ -1118,6 +1129,9 @@ enum JanetOpCode {
     JOP_GREATER_THAN_EQUAL,
     JOP_LESS_THAN_EQUAL,
     JOP_NEXT,
+    JOP_NOT_EQUALS,
+    JOP_NOT_EQUALS_IMMEDIATE,
+    JOP_CANCEL,
     JOP_INSTRUCTION_COUNT
 };
 
@@ -1302,6 +1316,7 @@ JANET_API void janet_table_merge_table(JanetTable *table, JanetTable *other);
 JANET_API void janet_table_merge_struct(JanetTable *table, JanetStruct other);
 JANET_API JanetKV *janet_table_find(JanetTable *t, Janet key);
 JANET_API JanetTable *janet_table_clone(JanetTable *table);
+JANET_API void janet_table_clear(JanetTable *table);
 
 /* Fiber */
 JANET_API JanetFiber *janet_fiber(JanetFunction *callee, int32_t capacity, int32_t argc, const Janet *argv);
@@ -1372,7 +1387,7 @@ JANET_API int janet_verify(JanetFuncDef *def);
 JANET_API JanetBuffer *janet_pretty(JanetBuffer *buffer, int depth, int flags, Janet x);
 
 /* Misc */
-#ifndef JANET_NO_PRF
+#ifdef JANET_PRF
 #define JANET_HASH_KEY_SIZE 16
 JANET_API void janet_init_hash_key(uint8_t key[JANET_HASH_KEY_SIZE]);
 #endif
@@ -1398,6 +1413,7 @@ JANET_API int janet_symeq(Janet x, const char *cstring);
 JANET_API int janet_init(void);
 JANET_API void janet_deinit(void);
 JANET_API JanetSignal janet_continue(JanetFiber *fiber, Janet in, Janet *out);
+JANET_API JanetSignal janet_continue_signal(JanetFiber *fiber, Janet in, Janet *out, JanetSignal sig);
 JANET_API JanetSignal janet_pcall(JanetFunction *fun, int32_t argn, const Janet *argv, Janet *out, JanetFiber **f);
 JANET_API JanetSignal janet_step(JanetFiber *fiber, Janet in, Janet *out);
 JANET_API Janet janet_call(JanetFunction *fun, int32_t argc, const Janet *argv);
@@ -1524,12 +1540,16 @@ extern JANET_API const JanetAbstractType janet_file_type;
 #define JANET_FILE_BINARY 64
 #define JANET_FILE_SERIALIZABLE 128
 #define JANET_FILE_PIPED 256
+#define JANET_FILE_NONIL 512
 
-JANET_API Janet janet_makefile(FILE *f, int flags);
-JANET_API FILE *janet_getfile(const Janet *argv, int32_t n, int *flags);
+JANET_API Janet janet_makefile(FILE *f, int32_t flags);
+JANET_API FILE *janet_getfile(const Janet *argv, int32_t n, int32_t *flags);
 JANET_API FILE *janet_dynfile(const char *name, FILE *def);
+JANET_API JanetFile *janet_getjfile(const Janet *argv, int32_t n);
 JANET_API JanetAbstract janet_checkfile(Janet j);
-JANET_API FILE *janet_unwrapfile(Janet j, int *flags);
+JANET_API FILE *janet_unwrapfile(Janet j, int32_t *flags);
+
+JANET_API int janet_cryptorand(uint8_t *out, size_t n);
 
 /* Marshal API */
 JANET_API void janet_marshal_size(JanetMarshalContext *ctx, size_t value);
@@ -1582,6 +1602,8 @@ typedef enum {
     RULE_ERROR,        /* [rule] */
     RULE_DROP,         /* [rule] */
     RULE_BACKMATCH,    /* [tag] */
+    RULE_TO,           /* [rule] */
+    RULE_THRU,         /* [rule] */
     RULE_LENPREFIX,    /* [rule_a, rule_b (repeat rule_b rule_a times)] */
 } JanetPegOpcode;
 

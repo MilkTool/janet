@@ -2,10 +2,10 @@
 &nbsp;
 [![Appveyor Status](https://ci.appveyor.com/api/projects/status/bjraxrxexmt3sxyv/branch/master?svg=true)](https://ci.appveyor.com/project/bakpakin/janet/branch/master)
 [![Build Status](https://travis-ci.org/janet-lang/janet.svg?branch=master)](https://travis-ci.org/janet-lang/janet)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/freebsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/freebsd.yml?)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/openbsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/openbsd.yml?)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/meson.yml.svg)](https://builds.sr.ht/~bakpakin/janet/meson.yml?)
-[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/meson_min.yml.svg)](https://builds.sr.ht/~bakpakin/janet/meson_min.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/freebsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/freebsd.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/openbsd.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/openbsd.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/meson.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/meson.yml?)
+[![builds.sr.ht status](https://builds.sr.ht/~bakpakin/janet/commits/meson_min.yml.svg)](https://builds.sr.ht/~bakpakin/janet/commits/meson_min.yml?)
 
 <img src="https://raw.githubusercontent.com/janet-lang/janet/master/assets/janet-w200.png" alt="Janet logo" width=200 align="left">
 
@@ -115,6 +115,11 @@ gmake test
 gmake repl
 ```
 
+### NetBSD
+
+NetBSD build instructions are the same as the FreeBSD build instuctions.
+Alternatively, install directly from packages, using `pkgin install janet`.
+
 ### Windows
 
 1. Install [Visual Studio](https://visualstudio.microsoft.com/thank-you-downloading-visual-studio/?sku=Community&rel=15#) or [Visual Studio Build Tools](https://visualstudio.microsoft.com/thank-you-downloading-visual-studio/?sku=BuildTools&rel=15#)
@@ -146,6 +151,7 @@ cd janet
 meson setup build \
           --buildtype release \
           --optimization 2 \
+          --libdir /usr/local/lib \
           -Dgit_hash=$(git log --pretty=format:'%h' -n 1)
 ninja -C build
 

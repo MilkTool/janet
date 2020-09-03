@@ -99,7 +99,7 @@
 (defn array? "Check if x is an array." [x] (= (type x) :array))
 (defn tuple? "Check if x is a tuple." [x] (= (type x) :tuple))
 (defn boolean? "Check if x is a boolean." [x] (= (type x) :boolean))
-(defn bytes? "Check if x is a string, symbol, or buffer." [x]
+(defn bytes? "Check if x is a string, symbol, keyword, or buffer." [x]
   (def t (type x))
   (if (= t :string) true (if (= t :symbol) true (if (= t :keyword) true (= t :buffer)))))
 (defn dictionary? "Check if x a table or struct." [x]
@@ -112,7 +112,7 @@
 (defn true? "Check if x is true." [x] (= x true))
 (defn false? "Check if x is false." [x] (= x false))
 (defn nil? "Check if x is nil." [x] (= x nil))
-(defn empty? "Check if xs is empty." [xs] (= 0 (length xs)))
+(defn empty? "Check if xs is empty." [xs] (= (length xs) 0))
 
 (def idempotent?
   "(idempotent? x)\n\nCheck if x is a value that evaluates to itself when compiled."
@@ -379,16 +379,27 @@
      ,(apply defer [(or dtor :close) binding] [truthy])
      ,falsey))
 
-(defn- for-template
-  [binding start stop step comparison delta body]
-  (with-syms [i s]
+(defn- for-var-template
+  [i start stop step comparison delta body]
+  (with-syms [s]
+    (def st (if (idempotent? step) step (gensym)))
+    (def loop-body
+      ~(while (,comparison ,i ,s)
+         ,;body
+         (set ,i (,delta ,i ,st))))
     ~(do
        (var ,i ,start)
        (def ,s ,stop)
-       (while (,comparison ,i ,s)
-         (def ,binding ,i)
-         ,;body
-         (set ,i (,delta ,i ,step))))))
+       ,;(if (= st step) [] [~(def ,st ,step)])
+       ,(if (and (number? st) (> st 0))
+          loop-body
+          ~(if (,> ,st 0) ,loop-body)))))
+
+(defn- for-template
+  [binding start stop step comparison delta body]
+  (def i (gensym))
+  (for-var-template i start stop step comparison delta
+                    [~(def ,binding ,i) ;body]))
 
 (defn- check-indexed [x]
   (if (indexed? x)
@@ -401,26 +412,18 @@
     (for-template binding start stop (or step 1) comparison op [rest])))
 
 (defn- each-template
-  [binding inx body]
+  [binding inx kind body]
   (with-syms [k]
     (def ds (if (idempotent? inx) inx (gensym)))
     ~(do
        ,(unless (= ds inx) ~(def ,ds ,inx))
        (var ,k (,next ,ds nil))
        (while (,not= nil ,k)
-         (def ,binding (,in ,ds ,k))
-         ,;body
-         (set ,k (,next ,ds ,k))))))
-
-(defn- keys-template
-  [binding in pair? body]
-  (with-syms [k]
-    (def ds (if (idempotent? in) in (gensym)))
-    ~(do
-       ,(unless (= ds in) ~(def ,ds ,in))
-       (var ,k (,next ,ds nil))
-       (while (,not= nil ,k)
-         (def ,binding ,(if pair? ~(tuple ,k (in ,ds ,k)) k))
+         (def ,binding
+           ,(case kind
+              :each ~(,in ,ds ,k)
+              :keys k
+              :pairs ~(,tuple ,k (,in ,ds ,k))))
          ,;body
          (set ,k (,next ,ds ,k))))))
 
@@ -432,6 +435,17 @@
        (while (set ,i ,expr)
          (def ,binding ,i)
          ,body))))
+
+(defn- loop-fiber-template
+  [binding expr body]
+  (with-syms [f s]
+    (def ds (if (idempotent? binding) binding (gensym)))
+    ~(let [,f ,expr]
+       (while true
+         (def ,ds (,resume ,f))
+         (if (= :dead (,fiber/status ,f)) (break))
+         ,;(if (= ds binding) [] [~(def ,binding ,ds)])
+         ,;body))))
 
 (defn- loop1
   [body head i]
@@ -466,17 +480,18 @@
       :range-to (range-template binding object rest + <=)
       :down (range-template binding object rest - >)
       :down-to (range-template binding object rest - >=)
-      :keys (keys-template binding object false [rest])
-      :pairs (keys-template binding object true [rest])
-      :in (each-template binding object [rest])
+      :keys (each-template binding object :keys [rest])
+      :pairs (each-template binding object :pairs [rest])
+      :in (each-template binding object :each [rest])
       :iterate (iterate-template binding object rest)
-      :generate (with-syms [f s]
-                  ~(let [,f ,object]
-                     (while true
-                       (def ,binding (,resume ,f))
-                       (if (= :dead (,fiber/status ,f)) (break))
-                       ,rest)))
+      :generate (loop-fiber-template binding object [rest])
       (error (string "unexpected loop verb " verb)))))
+
+(defmacro forv
+  "Do a c style for loop for side effects. The iteration variable i
+  can be mutated in the loop, unlike normal for. Returns nil."
+  [i start stop & body]
+  (for-var-template i start stop 1 < + body))
 
 (defmacro for
   "Do a c style for loop for side effects. Returns nil."
@@ -486,17 +501,34 @@
 (defmacro eachk
   "Loop over each key in ds. Returns nil."
   [x ds & body]
-  (keys-template x ds false body))
+  (each-template x ds :keys body))
 
 (defmacro eachp
   "Loop over each (key, value) pair in ds. Returns nil."
   [x ds & body]
-  (keys-template x ds true body))
+  (each-template x ds :pairs body))
+
+(defmacro eachy
+  "Resume a fiber in a loop until it has errored or died. Evaluate the body
+  of the loop with binding set to the yielded value."
+  [x fiber & body]
+  (loop-fiber-template x fiber body))
+
+(defmacro repeat
+  "Evaluate body n times. If n is negative, body will be evaluated 0 times. Evaluates to nil."
+  [n & body]
+  (with-syms [iter]
+    ~(do (var ,iter ,n) (while (> ,iter 0) ,;body (-- ,iter)))))
+
+(defmacro forever
+  "Evaluate body forever in a loop, or until a break statement."
+  [& body]
+  ~(while true ,;body))
 
 (defmacro each
   "Loop over each value in ds. Returns nil."
   [x ds & body]
-  (each-template x ds body))
+  (each-template x ds :each body))
 
 (defmacro loop
   "A general purpose loop macro. This macro is similar to the Common Lisp
@@ -538,10 +570,11 @@
 (put _env 'loop1 nil)
 (put _env 'check-indexed nil)
 (put _env 'for-template nil)
+(put _env 'for-var-template nil)
 (put _env 'iterate-template nil)
 (put _env 'each-template nil)
-(put _env 'keys-template nil)
 (put _env 'range-template nil)
+(put _env 'loop-fiber-template nil)
 
 (defmacro seq
   "Similar to loop, but accumulates the loop body into an array and returns that.
@@ -667,6 +700,57 @@
   [xs]
   (get xs (- (length xs) 1)))
 
+## Polymorphic comparisons
+
+(defn compare
+  "Polymorphic compare. Returns -1, 0, 1 for x < y, x = y, x > y respectively.
+   Differs from the primitive comparators in that it first checks to
+   see whether either x or y implement a 'compare' method which can
+   compare x and y. If so it uses that compare method. If not, it
+   delegates to the primitive comparators."
+  [x y]
+  (or
+    (when-let [f (get x :compare)] (f x y))
+    (when-let [f (get y :compare)] (- (f y x)))
+    (cmp x y)))
+
+(defn- compare-reduce [op xs]
+  (var r true)
+  (loop [i :range [0 (- (length xs) 1)]
+         :let [c (compare (xs i) (xs (+ i 1)))
+               ok (op c 0)]
+         :when (not ok)]
+    (set r false)
+    (break))
+  r)
+
+(defn compare=
+  "Equivalent of '=' but using compare function instead of primitive comparator"
+  [& xs]
+  (compare-reduce = xs))
+
+(defn compare<
+  "Equivalent of '<' but using compare function instead of primitive comparator"
+  [& xs]
+  (compare-reduce < xs))
+
+(defn compare<=
+  "Equivalent of '<=' but using compare function instead of primitive comparator"
+  [& xs]
+  (compare-reduce <= xs))
+
+(defn compare>
+  "Equivalent of '>' but using compare function instead of primitive comparator"
+  [& xs]
+  (compare-reduce > xs))
+
+(defn compare>=
+  "Equivalent of '>=' but using compare function instead of primitive comparator"
+  [& xs]
+  (compare-reduce >= xs))
+
+(put _env 'compare-reduce nil)
+
 ###
 ###
 ### Indexed Combinators
@@ -677,7 +761,7 @@
   [a lo hi by]
   (def pivot (in a hi))
   (var i lo)
-  (for j lo hi
+  (forv j lo hi
     (def aj (in a j))
     (when (by aj pivot)
       (def ai (in a i))
@@ -775,19 +859,19 @@
   (def ninds (length inds))
   (if (= 0 ninds) (error "expected at least 1 indexed collection"))
   (var limit (length (in inds 0)))
-  (for i 0 ninds
+  (forv i 0 ninds
     (def l (length (in inds i)))
     (if (< l limit) (set limit l)))
   (def [i1 i2 i3 i4] inds)
   (def res (array/new limit))
   (case ninds
-    1 (for i 0 limit (set (res i) (f (in i1 i))))
-    2 (for i 0 limit (set (res i) (f (in i1 i) (in i2 i))))
-    3 (for i 0 limit (set (res i) (f (in i1 i) (in i2 i) (in i3 i))))
-    4 (for i 0 limit (set (res i) (f (in i1 i) (in i2 i) (in i3 i) (in i4 i))))
-    (for i 0 limit
+    1 (forv i 0 limit (set (res i) (f (in i1 i))))
+    2 (forv i 0 limit (set (res i) (f (in i1 i) (in i2 i))))
+    3 (forv i 0 limit (set (res i) (f (in i1 i) (in i2 i) (in i3 i))))
+    4 (forv i 0 limit (set (res i) (f (in i1 i) (in i2 i) (in i3 i) (in i4 i))))
+    (forv i 0 limit
       (def args (array/new ninds))
-      (for j 0 ninds (set (args j) (in (in inds j) i)))
+      (forv j 0 ninds (set (args j) (in (in inds j) i)))
       (set (res i) (f ;args))))
   res)
 
@@ -839,12 +923,12 @@
     1 (do
         (def [n] args)
         (def arr (array/new n))
-        (for i 0 n (put arr i i))
+        (forv i 0 n (put arr i i))
         arr)
     2 (do
         (def [n m] args)
         (def arr (array/new (- m n)))
-        (for i n m (put arr (- i n) i))
+        (forv i n m (put arr (- i n) i))
         arr)
     3 (do
         (def [n m s] args)
@@ -872,6 +956,18 @@
   [pred ind]
   (def i (find-index pred ind))
   (if (= i nil) nil (in ind i)))
+
+(defn index-of
+  "Find the first key associated with a value x in a data structure, acting like a reverse lookup.
+  Will not look at table prototypes.
+  Returns dflt if not found."
+  [x ind &opt dflt]
+  (var k (next ind nil))
+  (var ret dflt)
+  (while (not= nil k)
+    (when (= (in ind k) x) (set ret k) (break))
+    (set k (next ind k)))
+  ret)
 
 (defn take
   "Take first n elements in an indexed type. Returns new indexed instance."
@@ -1127,19 +1223,43 @@
     (if x nil (set res x)))
   res)
 
+(defn any?
+  "Returns the first truthy value in ind, otherwise nil.
+  falsey value."
+  [ind]
+  (var res nil)
+  (loop [x :in ind :until res]
+    (if x (set res x)))
+  res)
+
+(defn reverse!
+  "Reverses the order of the elements in a given array or buffer and returns it
+  mutated."
+  [t]
+  (def len-1 (- (length t) 1))
+  (def half (/ len-1 2))
+  (forv i 0 half
+    (def j (- len-1 i))
+    (def l (in t i))
+    (def r (in t j))
+    (put t i r)
+    (put t j l))
+  t)
+
 (defn reverse
-  "Reverses the order of the elements in a given array or tuple and returns a new array."
+  "Reverses the order of the elements in a given array or tuple and returns
+  a new array. If string or buffer is provided function returns array of chars reversed."
   [t]
   (def len (length t))
   (var n (- len 1))
-  (def reversed (array/new len))
+  (def ret (array/new len))
   (while (>= n 0)
-    (array/push reversed (in t n))
+    (array/push ret (in t n))
     (-- n))
-  reversed)
+  ret)
 
 (defn invert
-  "Returns a table of where the keys of an associative data structure
+  "Returns a table where the keys of an associative data structure
   are the values, and the values of the keys. If multiple keys have the same
   value, one key will be ignored."
   [ds]
@@ -1153,11 +1273,14 @@
   Returns a new table."
   [ks vs]
   (def res @{})
-  (def lk (length ks))
-  (def lv (length vs))
-  (def len (if (< lk lv) lk lv))
-  (for i 0 len
-    (put res (in ks i) (in vs i)))
+  (var kk nil)
+  (var vk nil)
+  (while true
+    (set kk (next ks kk))
+    (if (= nil kk) (break))
+    (set vk (next vs vk))
+    (if (= nil vk) (break))
+    (put res (in ks kk) (in vs vk)))
   res)
 
 (defn get-in
@@ -1177,7 +1300,7 @@
   (var d ds)
   (def len-1 (- (length ks) 1))
   (if (< len-1 0) (error "expected at least 1 key in ks"))
-  (for i 0 len-1
+  (forv i 0 len-1
     (def k (get ks i))
     (def v (get d k))
     (if (= nil v)
@@ -1199,7 +1322,7 @@
   (var d ds)
   (def len-1 (- (length ks) 1))
   (if (< len-1 0) (error "expected at least 1 key in ks"))
-  (for i 0 len-1
+  (forv i 0 len-1
     (def k (get ks i))
     (def v (get d k))
     (if (= nil v)
@@ -1681,14 +1804,16 @@
   (defn expandqq [t]
     (defn qq [x]
       (case (type x)
-        :tuple (do
-                 (def x0 (in x 0))
-                 (if (or (= 'unquote x0) (= 'unquote-splicing x0))
-                   (tuple x0 (recur (in x 1)))
-                   (tuple/slice (map qq x))))
+        :tuple (if (= :brackets (tuple/type x))
+                 ~[,;(map qq x)]
+                 (do
+                   (def x0 (get x 0))
+                   (if (= 'unquote x0)
+                     (tuple x0 (recur (get x 1)))
+                     (tuple/slice (map qq x)))))
         :array (map qq x)
-        :table (table (map qq (kvs x)))
-        :struct (struct (map qq (kvs x)))
+        :table (table ;(map qq (kvs x)))
+        :struct (struct ;(map qq (kvs x)))
         x))
     (tuple (in t 0) (qq (in t 1))))
 
@@ -1872,20 +1997,24 @@
   that should make it easier to write more complex patterns."
   ~@{:d (range "09")
      :a (range "az" "AZ")
-     :s (set " \t\r\n\0\f")
+     :s (set " \t\r\n\0\f\v")
      :w (range "az" "AZ" "09")
+     :h (range "09" "af")
      :S (if-not :s 1)
      :W (if-not :w 1)
      :A (if-not :a 1)
      :D (if-not :d 1)
+     :H (if-not :h 1)
      :d+ (some :d)
      :a+ (some :a)
      :s+ (some :s)
      :w+ (some :w)
+     :h+ (some :h)
      :d* (any :d)
      :a* (any :a)
      :w* (any :w)
-     :s* (any :s)})
+     :s* (any :s)
+     :h* (any :h)})
 
 ###
 ###
@@ -1939,6 +2068,14 @@
       where
       (if ec "\e[0m" "")))
   (eflush))
+
+(defn curenv
+  "Get the current environment table. Same as (fiber/getenv (fiber/current)). If n
+  is provided, gets the nth prototype of the environment table."
+  [&opt n]
+  (var e (fiber/getenv (fiber/current)))
+  (if n (repeat n (if (= nil e) (break)) (set e (table/getproto e))))
+  e)
 
 (defn run-context
   "Run a context. This evaluates expressions in an environment,
@@ -2067,12 +2204,12 @@
       (buffer/push-string buf "\n")))
   (var returnval nil)
   (run-context {:chunks chunks
-                :on-compile-error (fn [msg errf &]
+                :on-compile-error (fn compile-error [msg errf &]
                                     (error (string "compile error: " msg)))
-                :on-parse-error (fn [p x]
+                :on-parse-error (fn parse-error [p x]
                                   (error (string "parse error: " (parser/error p))))
                 :fiber-flags :i
-                :on-status (fn [f val]
+                :on-status (fn on-status [f val]
                              (if-not (= (fiber/status f) :dead)
                                (error val))
                              (set returnval val))
@@ -2338,7 +2475,8 @@
   to be called. Dynamic bindings will NOT be imported. Use :fresh to bypass the
   module cache."
   [path & args]
-  (def argm (map |(if (keyword? $) $ (string $)) args))
+  (def ps (partition 2 args))
+  (def argm (mapcat (fn [[k v]] [k (if (= k :as) (string v) v)]) ps))
   (tuple import* (string path) ;argm))
 
 (defmacro use
@@ -2441,7 +2579,7 @@
   [&opt n]
   (def fun (.fn n))
   (def bytecode (.bytecode n))
-  (for i 0 (length bytecode)
+  (forv i 0 (length bytecode)
     (debug/fbreak fun i))
   (print "Set " (length bytecode) " breakpoints in " fun))
 
@@ -2450,7 +2588,7 @@
   [&opt n]
   (def fun (.fn n))
   (def bytecode (.bytecode n))
-  (for i 0 (length bytecode)
+  (forv i 0 (length bytecode)
     (debug/unfbreak fun i))
   (print "Cleared " (length bytecode) " breakpoints in " fun))
 
@@ -2492,7 +2630,7 @@
   "Go to the next breakpoint."
   [&opt n]
   (var res nil)
-  (for i 0 (or n 1)
+  (forv i 0 (or n 1)
     (set res (resume (.fiber))))
   res)
 
@@ -2506,7 +2644,7 @@
   "Execute the next n instructions."
   [&opt n]
   (var res nil)
-  (for i 0 (or n 1)
+  (forv i 0 (or n 1)
     (set res (debug/step (.fiber))))
   res)
 
@@ -2652,7 +2790,7 @@
   -m syspath : Set system path for loading global modules
   -c source output : Compile janet source code into an image
   -n : Disable ANSI color output in the repl
-  -l path : Execute code in a file before running the main script
+  -l lib : Import a module before processing more arguments
   -- : Stop handling options`)
            (os/exit 0)
            1)
@@ -2664,17 +2802,17 @@
      "k" (fn [&] (set *compile-only* true) (set *exit-on-error* false) 1)
      "n" (fn [&] (set *colorize* false) 1)
      "m" (fn [i &] (setdyn :syspath (in args (+ i 1))) 2)
-     "c" (fn [i &]
+     "c" (fn c-switch [i &]
            (def e (dofile (in args (+ i 1))))
            (spit (in args (+ i 2)) (make-image e))
            (set *no-file* false)
            3)
      "-" (fn [&] (set *handleopts* false) 1)
-     "l" (fn [i &]
+     "l" (fn l-switch [i &]
            (import* (in args (+ i 1))
                     :prefix "" :exit *exit-on-error*)
            2)
-     "e" (fn [i &]
+     "e" (fn e-switch [i &]
            (set *no-file* false)
            (eval-string (in args (+ i 1)))
            2)
@@ -2721,18 +2859,19 @@
         (def subargs (array/slice args i))
         (put env :args subargs)
         (dofile arg :prefix "" :exit *exit-on-error* :evaluator evaluator :env env)
-        (if-let [main (get (in env 'main) :value)]
-          (let [thunk (compile [main ;(tuple/slice args i)] env arg)]
-            (if (function? thunk) (thunk) (error (thunk :error)))))
+        (unless *compile-only*
+          (if-let [main (get (in env 'main) :value)]
+            (let [thunk (compile [main ;(tuple/slice args i)] env arg)]
+              (if (function? thunk) (thunk) (error (thunk :error))))))
         (set i lenargs))))
 
   (when (and (not *compile-only*) (or *should-repl* *no-file*))
     (if-not *quiet*
-      (print "Janet " janet/version "-" janet/build "  Copyright (C) 2017-2020 Calvin Rose"))
+      (print "Janet " janet/version "-" janet/build " " (os/which) "/" (os/arch)))
     (flush)
     (defn getprompt [p]
       (def [line] (parser/where p))
-      (string "janet:" line ":" (parser/state p :delimiters) "> "))
+      (string "repl:" line ":" (parser/state p :delimiters) "> "))
     (defn getstdin [prompt buf _]
       (file/write stdout prompt)
       (file/flush stdout)

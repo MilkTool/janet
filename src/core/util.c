@@ -26,6 +26,14 @@
 #include "util.h"
 #include "state.h"
 #include "gc.h"
+#ifdef JANET_WINDOWS
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#endif
 #endif
 
 #include <inttypes.h>
@@ -94,7 +102,7 @@ const char *const janet_status_names[16] = {
     "alive"
 };
 
-#ifdef JANET_NO_PRF
+#ifndef JANET_PRF
 
 int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
     const uint8_t *end = str + len;
@@ -574,8 +582,12 @@ int janet_checksize(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
     double dval = janet_unwrap_number(x);
-    return dval == (double)((size_t) dval) &&
-           dval <= SIZE_MAX;
+    if (dval != (double)((size_t) dval)) return 0;
+    if (SIZE_MAX > JANET_INTMAX_INT64) {
+        return dval <= JANET_INTMAX_INT64;
+    } else {
+        return dval <= SIZE_MAX;
+    }
 }
 
 JanetTable *janet_get_core_table(const char *name) {
@@ -585,4 +597,89 @@ JanetTable *janet_get_core_table(const char *name) {
     if (bt == JANET_BINDING_NONE) return NULL;
     if (!janet_checktype(out, JANET_TABLE)) return NULL;
     return janet_unwrap_table(out);
+}
+
+/* Clock shims for various platforms */
+#ifdef JANET_GETTIME
+/* For macos */
+#ifdef __MACH__
+#include <mach/clock.h>
+#include <mach/mach.h>
+#endif
+#ifdef JANET_WINDOWS
+int janet_gettime(struct timespec *spec) {
+    FILETIME ftime;
+    GetSystemTimeAsFileTime(&ftime);
+    int64_t wintime = (int64_t)(ftime.dwLowDateTime) | ((int64_t)(ftime.dwHighDateTime) << 32);
+    /* Windows epoch is January 1, 1601 apparently */
+    wintime -= 116444736000000000LL;
+    spec->tv_sec  = wintime / 10000000LL;
+    /* Resolution is 100 nanoseconds. */
+    spec->tv_nsec = wintime % 10000000LL * 100;
+    return 0;
+}
+#elif defined(__MACH__)
+int janet_gettime(struct timespec *spec) {
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    spec->tv_sec = mts.tv_sec;
+    spec->tv_nsec = mts.tv_nsec;
+    return 0;
+}
+#else
+int janet_gettime(struct timespec *spec) {
+    return clock_gettime(CLOCK_REALTIME, spec);
+}
+#endif
+#endif
+
+/* Setting C99 standard makes this not available, but it should
+ * work/link properly if we detect a BSD */
+#if defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
+void arc4random_buf(void *buf, size_t nbytes);
+#endif
+
+int janet_cryptorand(uint8_t *out, size_t n) {
+#ifdef JANET_WINDOWS
+    for (size_t i = 0; i < n; i += sizeof(unsigned int)) {
+        unsigned int v;
+        if (rand_s(&v))
+            return -1;
+        for (int32_t j = 0; (j < sizeof(unsigned int)) && (i + j < n); j++) {
+            out[i + j] = v & 0xff;
+            v = v >> 8;
+        }
+    }
+    return 0;
+#elif defined(JANET_LINUX) || ( defined(JANET_APPLE) && !defined(MAC_OS_X_VERSION_10_7) )
+    /* We should be able to call getrandom on linux, but it doesn't seem
+       to be uniformly supported on linux distros.
+       On Mac, arc4random_buf wasn't available on until 10.7.
+       In these cases, use this fallback path for now... */
+    int rc;
+    int randfd;
+    RETRY_EINTR(randfd, open("/dev/urandom", O_RDONLY | O_CLOEXEC));
+    if (randfd < 0)
+        return -1;
+    while (n > 0) {
+        ssize_t nread;
+        RETRY_EINTR(nread, read(randfd, out, n));
+        if (nread <= 0) {
+            RETRY_EINTR(rc, close(randfd));
+            return -1;
+        }
+        out += nread;
+        n -= nread;
+    }
+    RETRY_EINTR(rc, close(randfd));
+    return 0;
+#elif defined(JANET_BSD) || defined(MAC_OS_X_VERSION_10_7)
+    arc4random_buf(out, n);
+    return 0;
+#else
+    return -1;
+#endif
 }

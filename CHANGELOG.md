@@ -2,7 +2,90 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased - ???
-- Add JANET_GIT environment variable to jpm to use a specific git binary (useful mainly on windows).
+- Add `os/proc-wait` and `os/proc-kill` for interacting with processes.
+- Add `janet_getjfile` to C API.
+- Allow redirection of stdin, stdout, and stderr by passing keywords in the env table.
+- Add `:a` flag to `os/execute` to get a core/process back instead of an exit code.
+  When called like this, `os/execute` returns immediately.
+- Add `:x` flag to os/execute to raise error when exit code is non-zero.
+- Don't run `main` when flychecking.
+- Add `:n` flag to `file/open` to raise an error if file cannot be opened.
+- Fix import macro to not try and coerce everything to a string.
+- Allow passing a second argument to `disasm`.
+- Add `cancel`. Resumes a fiber but makes it immediately error at the yield point.
+- Allow multi-line paste into built in repl.
+- Add `(curenv)`.
+- Change `net/read`, `net/chunk`, and `net/write` to raise errors in the case of failures.
+- Add `janet_continue_signal` to C API. This indirectly enables C functions that yield to the event loop
+  to raise errors or other signals.
+- Update meson build script to fix bug on Debian's version of meson
+- Add `xprint`, `xprin`, `xprintf`, and `xprinf`.
+- `net/write` now raises an error message if write fails.
+- Fix issue with SIGPIPE on macOS and BSDs.
+
+## 1.11.3 - 2020-08-03
+- Add `JANET_HASHSEED` environment variable when `JANET_PRF` is enabled.
+- Expose `janet_cryptorand` in C API.
+- Properly initialize PRF in default janet program
+- Add `index-of` to core library.
+- Add `-fPIC` back to core CFLAGS (non-optional when compiling default client with Makefile)
+- Fix defaults on Windows for ARM
+- Fix defaults on NetBSD.
+
+## 1.11.1 - 2020-07-25
+- Fix jpm and git with multiple git installs on Windows
+- Fix importing a .so file in the current directory
+- Allow passing byte sequence types directly to typed-array constructors.
+- Fix bug sending files between threads.
+- Disable PRF by default.
+- Update the soname.
+
+## 1.11.0 - 2020-07-18
+- Add `forever` macro.
+- Add `any?` predicate to core.
+- Add `jpm list-pkgs` subcommand to see which package aliases are in the listing.
+- Add `jpm list-installed` subcommand to see which packages are installed.
+- Add `math/int-min`, `math/int-max`, `math/int32-min`, and `math/int32-max` for getting integer limits.
+- The gc interval is now autotuned, to prevent very bad gc behavior.
+- Improvements to the bytecode compiler, Janet will now generate more efficient bytecode.
+- Add `peg/find`, `peg/find-all`, `peg/replace`, and `peg/replace-all`
+- Add `math/nan`
+- Add `forv` macro
+- Add `symbol/slice`
+- Add `keyword/slice`
+- Allow cross compilation with Makefile.
+- Change `compare-primitve` to `cmp` and make it more efficient.
+- Add `reverse!` for reversing an array or buffer in place.
+- `janet_dobytes` and `janet_dostring` return parse errors in \*out
+- Add `repeat` macro for iterating something n times.
+- Add `eachy` (each yield) macro for iterating a fiber.
+- Fix `:generate` verb in loop macro to accept non symbols as bindings.
+- Add `:h`, `:h+`, and `:h*` in `default-peg-grammar` for hexidecimal digits.
+- Fix `%j` formatter to print numbers precisely (using the `%.17g` format string to printf).
+
+## 1.10.1 - 2020-06-18
+- Expose `janet_table_clear` in API.
+- Respect `JANET_NO_PROCESSES` define when building
+- Fix `jpm` rules having multiple copies of the same dependency.
+- Fix `jpm` install in some cases.
+- Add `array/trim` and `buffer/trim` to shrink the backing capacity of these types
+  to their current length.
+
+## 1.10.0 - 2020-06-14
+- Hardcode default jpm paths on install so env variables are needed in fewer cases.
+- Add `:no-compile` to `create-executable` option for jpm.
+- Fix bug with the `trace` function.
+- Add `:h`, `:a`, and `:c` flags to `thread/new` for creating new kinds of threads.
+  By default, threads will now consume much less memory per thread, but sending data between
+  threads may cost more.
+- Fix flychecking when using the `use` macro.
+- CTRL-C no longer exits the repl, and instead cancels the current form.
+- Various small bug fixes
+- New MSI installer instead of NSIS based installer.
+- Make `os/realpath` work on windows.
+- Add polymorphic `compare` functions for comparing numbers.
+- Add `to` and `thru` peg combinators.
+- Add `JANET_GIT` environment variable to jpm to use a specific git binary (useful mainly on windows).
 - `asm` and `disasm` functions now use keywords instead of macros for keys. Also
   some slight changes to the way constants are encoded (remove wrapping `quote` in some cases).
 - Expose current macro form inside macros as (dyn :macro-form)

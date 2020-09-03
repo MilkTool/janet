@@ -101,10 +101,13 @@ enum JanetInstructionType janet_instructions[JOP_INSTRUCTION_COUNT] = {
     JINT_SSS, /* JOP_GREATER_THAN_EQUAL */
     JINT_SSS, /* JOP_LESS_THAN_EQUAL */
     JINT_SSS, /* JOP_NEXT */
+    JINT_SSS, /* JOP_NOT_EQUALS, */
+    JINT_SSI, /* JOP_NOT_EQUALS_IMMEDIATE, */
+    JINT_SSS /* JOP_CANCEL, */
 };
 
 /* Verify some bytecode */
-int32_t janet_verify(JanetFuncDef *def) {
+int janet_verify(JanetFuncDef *def) {
     int vargs = !!(def->flags & JANET_FUNCDEF_FLAG_VARARG);
     int32_t i;
     int32_t maxslot = def->arity + vargs;

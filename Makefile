@@ -33,13 +33,20 @@ JANET_TARGET=build/janet
 JANET_LIBRARY=build/libjanet.so
 JANET_STATIC_LIBRARY=build/libjanet.a
 JANET_PATH?=$(LIBDIR)/janet
-MANPATH?=$(PREFIX)/share/man/man1/
-PKG_CONFIG_PATH?=$(LIBDIR)/pkgconfig
+JANET_MANPATH?=$(PREFIX)/share/man/man1/
+JANET_PKG_CONFIG_PATH?=$(LIBDIR)/pkgconfig
 DEBUGGER=gdb
 SONAME_SETTER=-Wl,-soname,
 
-CFLAGS:=$(CFLAGS) -std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fPIC -O2 -fvisibility=hidden
-LDFLAGS:=$(LDFLAGS) -rdynamic
+# For cross compilation
+HOSTCC?=$(CC)
+HOSTAR?=$(AR)
+CFLAGS?=-O2
+LDFLAGS?=-rdynamic
+
+COMMON_CFLAGS:=-std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fvisibility=hidden -fPIC
+BOOT_CFLAGS:=-DJANET_BOOTSTRAP -DJANET_BUILD=$(JANET_BUILD) -O0 -g $(COMMON_CFLAGS)
+BUILD_CFLAGS:=$(CFLAGS) $(COMMON_CFLAGS)
 
 # For installation
 LDCONFIG:=ldconfig "$(LIBDIR)"
@@ -131,7 +138,6 @@ JANET_BOOT_HEADERS=src/boot/tests.h
 ##########################################################
 
 JANET_BOOT_OBJECTS=$(patsubst src/%.c,build/%.boot.o,$(JANET_CORE_SOURCES) $(JANET_BOOT_SOURCES))
-BOOT_CFLAGS:=-DJANET_BOOTSTRAP -DJANET_BUILD=$(JANET_BUILD) $(CFLAGS)
 
 $(JANET_BOOT_OBJECTS): $(JANET_BOOT_HEADERS)
 
@@ -149,7 +155,7 @@ build/janet.c: build/janet_boot src/boot/boot.janet
 ##### Amalgamation #####
 ########################
 
-SONAME=libjanet.so.1.9
+SONAME=libjanet.so.1.11
 
 build/shell.c: src/mainclient/shell.c
 	cp $< $@
@@ -161,23 +167,25 @@ build/janetconf.h: src/conf/janetconf.h
 	cp $< $@
 
 build/janet.o: build/janet.c build/janet.h build/janetconf.h
-	$(CC) $(CFLAGS) -c $< -o $@ -I build
+	$(HOSTCC) $(BUILD_CFLAGS) -c $< -o $@ -I build
 
 build/shell.o: build/shell.c build/janet.h build/janetconf.h
-	$(CC) $(CFLAGS) -c $< -o $@ -I build
+	$(HOSTCC) $(BUILD_CFLAGS) -c $< -o $@ -I build
 
 $(JANET_TARGET): build/janet.o build/shell.o
-	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $^ $(CLIBS)
+	$(HOSTCC) $(LDFLAGS) $(BUILD_CFLAGS) -o $@ $^ $(CLIBS)
 
 $(JANET_LIBRARY): build/janet.o build/shell.o
-	$(CC) $(LDFLAGS) $(CFLAGS) $(SONAME_SETTER)$(SONAME) -shared -o $@ $^ $(CLIBS)
+	$(HOSTCC) $(LDFLAGS) $(BUILD_CFLAGS) $(SONAME_SETTER)$(SONAME) -shared -o $@ $^ $(CLIBS)
 
 $(JANET_STATIC_LIBRARY): build/janet.o build/shell.o
-	$(AR) rcs $@ $^
+	$(HOSTAR) rcs $@ $^
 
 ###################
 ##### Testing #####
 ###################
+
+# Testing assumes HOSTCC=CC
 
 TEST_SCRIPTS=$(wildcard test/suite*.janet)
 
@@ -233,6 +241,10 @@ build/doc.html: $(JANET_TARGET) tools/gendoc.janet
 ##### Installation #####
 ########################
 
+build/jpm: jpm $(JANET_TARGET)
+	$(JANET_TARGET) tools/patch-jpm.janet jpm build/jpm "--libpath=$(LIBDIR)" "--headerpath=$(INCLUDEDIR)/janet" "--binpath=$(BINDIR)"
+	chmod +x build/jpm
+
 .INTERMEDIATE: build/janet.pc
 build/janet.pc: $(JANET_TARGET)
 	echo 'prefix=$(PREFIX)' > $@
@@ -248,7 +260,7 @@ build/janet.pc: $(JANET_TARGET)
 	echo 'Libs: -L$${libdir} -ljanet' >> $@
 	echo 'Libs.private: $(CLIBS)' >> $@
 
-install: $(JANET_TARGET) build/janet.pc
+install: $(JANET_TARGET) build/janet.pc build/jpm
 	mkdir -p '$(DESTDIR)$(BINDIR)'
 	cp $(JANET_TARGET) '$(DESTDIR)$(BINDIR)/janet'
 	mkdir -p '$(DESTDIR)$(INCLUDEDIR)/janet'
@@ -259,12 +271,12 @@ install: $(JANET_TARGET) build/janet.pc
 	cp $(JANET_STATIC_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.a'
 	ln -sf $(SONAME) '$(DESTDIR)$(LIBDIR)/libjanet.so'
 	ln -sf libjanet.so.$(shell $(JANET_TARGET) -e '(print janet/version)') $(DESTDIR)$(LIBDIR)/$(SONAME)
-	cp -rf jpm '$(DESTDIR)$(BINDIR)'
-	mkdir -p '$(DESTDIR)$(MANPATH)'
-	cp janet.1 '$(DESTDIR)$(MANPATH)'
-	cp jpm.1 '$(DESTDIR)$(MANPATH)'
-	mkdir -p '$(DESTDIR)$(PKG_CONFIG_PATH)'
-	cp build/janet.pc '$(DESTDIR)$(PKG_CONFIG_PATH)/janet.pc'
+	cp -rf build/jpm '$(DESTDIR)$(BINDIR)'
+	mkdir -p '$(DESTDIR)$(JANET_MANPATH)'
+	cp janet.1 '$(DESTDIR)$(JANET_MANPATH)'
+	cp jpm.1 '$(DESTDIR)$(JANET_MANPATH)'
+	mkdir -p '$(DESTDIR)$(JANET_PKG_CONFIG_PATH)'
+	cp build/janet.pc '$(DESTDIR)$(JANET_PKG_CONFIG_PATH)/janet.pc'
 	[ -z '$(DESTDIR)' ] && $(LDCONFIG) || true
 
 uninstall:
@@ -272,9 +284,9 @@ uninstall:
 	-rm '$(DESTDIR)$(BINDIR)/jpm'
 	-rm -rf '$(DESTDIR)$(INCLUDEDIR)/janet'
 	-rm -rf '$(DESTDIR)$(LIBDIR)'/libjanet.*
-	-rm '$(DESTDIR)$(PKG_CONFIG_PATH)/janet.pc'
-	-rm '$(DESTDIR)$(MANPATH)/janet.1'
-	-rm '$(DESTDIR)$(MANPATH)/jpm.1'
+	-rm '$(DESTDIR)$(JANET_PKG_CONFIG_PATH)/janet.pc'
+	-rm '$(DESTDIR)$(JANET_MANPATH)/janet.1'
+	-rm '$(DESTDIR)$(JANET_MANPATH)/jpm.1'
 	# -rm -rf '$(DESTDIR)$(JANET_PATH)'/* - err on the side of correctness here
 
 #################

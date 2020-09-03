@@ -194,8 +194,8 @@ Source should be a path to the Janet module to compile, and output should be the
 resulting image. Output should usually end with the .jimage extension.
 
 .TP
-.BR \-l\ path
-Load a Janet file before running a script or repl. Multiple files can be loaded
+.BR \-l\ lib
+Import a Janet module before running a script or repl. Multiple files can be loaded
 in this manner, and exports from each file will be made available to the script
 or repl.
 
@@ -211,6 +211,14 @@ and then arguments to the script.
 The location to look for Janet libraries. This is the only environment variable Janet needs to
 find native and source code modules. If no JANET_PATH is set, Janet will look in
 the default location set at compile time.
+.RE
+
+.B JANET_HASHSEED
+.RS
+To disable randomization of Janet's PRF on start up, one can set this variable. This can have the
+effect of making programs deterministic that otherwise would depend on the random seed chosen at program start.
+This variable does nothing in the default configuration of Janet, as PRF is disabled by default. Also, JANET_REDUCED_OS
+cannot be defined for this variable to have an effect.
 .RE
 
 .SH AUTHOR
